@@ -1,0 +1,153 @@
+este codigo sirve para adquirir señales de ECG con un ESP32,procesarla 
+en tiempo real,aplicar filtros digitales(promedio,mediana y exponencial), y guardar los datos
+en un archivo para un analisis posterior, tambien cuenta con un led que indica que el muestreo esta activo 
+
+from machine import Pin, ADC, Timer
+import time
+
+# ================================
+# CONFIGURACIÓN
+# ================================
+ECG_PIN = 34   # Pin analógico ESP32
+LED_PIN = 5
+FS = 250       # Frecuencia de muestreo Hz
+WINDOW_SIZE = 25
+ALPHA = 0.1
+FILENAME = "ecg_data.txt"
+
+# ================================
+# INICIALIZACIÓN
+# ================================
+adc = ADC(Pin(ECG_PIN))
+adc.atten(ADC.ATTN_11DB)    # rango hasta ~3.6V
+adc.width(ADC.WIDTH_12BIT)  # 12 bits (0-4095)
+
+led = Pin(LED_PIN, Pin.OUT)
+led.value(0)
+
+# Buffers y variables globales
+moving_avg_buffer = []
+median_buffer = []
+exp_filtered = 0
+
+# Archivo para guardar datos
+f = open(FILENAME, "w")
+
+# ================================
+# FUNCIONES DE FILTROS
+# ================================
+def moving_average(val):
+    moving_avg_buffer.append(val)
+    if len(moving_avg_buffer) > WINDOW_SIZE:
+        moving_avg_buffer.pop(0)
+    return sum(moving_avg_buffer) / len(moving_avg_buffer)
+
+def median_filter(val):
+    median_buffer.append(val)
+    if len(median_buffer) > WINDOW_SIZE:
+        median_buffer.pop(0)
+    s = sorted(median_buffer)
+    n = len(s)
+    mid = n // 2
+    return (s[mid-1] + s[mid]) / 2 if n % 2 == 0 else s[mid]
+
+def exponential_filter(val):
+    global exp_filtered
+    exp_filtered = ALPHA * val + (1 - ALPHA) * exp_filtered
+    return exp_filtered
+
+# ================================
+# MENÚ DE FILTROS
+# ================================
+print("=== CONFIGURACIÓN DE FILTROS ===")
+print("1 - Paralelo (cada filtro independiente)")
+print("2 - Cascada (salida de uno entra al siguiente)")
+modo = input("Elige modo (1/2): ").strip()
+
+if modo == "1":
+    modo = "paralelo"
+    print("Elige qué filtros activar (separados por coma)")
+    print("Opciones: crudo,promedio,mediana,exponencial")
+    seleccion = input(">> ").strip().lower().split(",")
+    filtros_activos = [f.strip() for f in seleccion if f.strip() in ["crudo","promedio","mediana","exponencial"]]
+
+elif modo == "2":
+    modo = "cascada"
+    print("Escribe el ORDEN de los filtros en cascada (ej: crudo,promedio,exponencial)")
+    seleccion = input(">> ").strip().lower().split(",")
+    filtros_activos = [f.strip() for f in seleccion if f.strip() in ["crudo","promedio","mediana","exponencial"]]
+
+else:
+    print("Opción no válida, se usará paralelo con todos los filtros.")
+    modo = "paralelo"
+    filtros_activos = ["crudo","promedio","mediana","exponencial"]
+
+print("Modo elegido:", modo)
+print("Filtros seleccionados:", filtros_activos)
+
+# ================================
+# CALLBACK DE TIMER
+# ================================
+def sample_callback(timer):
+    raw = adc.read()
+
+    if modo == "paralelo":
+        valores = []
+        if "crudo" in filtros_activos:
+            valores.append(str(raw))
+        if "promedio" in filtros_activos:
+            valores.append(str(int(moving_average(raw))))
+        if "mediana" in filtros_activos:
+            valores.append(str(int(median_filter(raw))))
+        if "exponencial" in filtros_activos:
+            valores.append(str(int(exponential_filter(raw))))
+
+        line = ",".join(valores)
+
+    elif modo == "cascada":
+        val = raw
+        valores = []
+        for f_name in filtros_activos:
+            if f_name == "crudo":
+                valores.append(str(val))
+            elif f_name == "promedio":
+                val = moving_average(val)
+                valores.append(str(int(val)))
+            elif f_name == "mediana":
+                val = median_filter(val)
+                valores.append(str(int(val)))
+            elif f_name == "exponencial":
+                val = exponential_filter(val)
+                valores.append(str(int(val)))
+
+        line = ",".join(valores)
+
+    print(line)
+    f.write(line + "\n")
+
+    # Indicador LED
+    led.value(1)
+    time.sleep_us(100)
+    led.value(0)
+
+# ================================
+# CONFIGURAR TIMER
+# ================================
+period = int(1000 / FS)
+timer = Timer(0)
+timer.init(period=period, mode=Timer.PERIODIC, callback=sample_callback)
+
+print("Adquisición iniciada... (Ctrl+C para detener)")
+
+# ================================
+# LOOP PRINCIPAL
+# ================================
+try:
+    while True:
+        time.sleep(1)
+except KeyboardInterrupt:
+    print("\nAdquisición detenida por el usuario.")
+    timer.deinit()
+    f.close()
+    led.value(0)
+    print("Archivo '{}' guardado correctamente.".format(FILENAME))
